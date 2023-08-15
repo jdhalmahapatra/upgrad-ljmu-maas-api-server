@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>maas HTML5 Client</title>
+    <link rel="stylesheet" href="/lib/bootstrap/dist/css/bootstrap.css">
+    <link rel="stylesheet" href="/css/webclient.css"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+</head>
+<body>
+<div id="content">
+    <table style="margin-left:auto; margin-right:auto; text-align:center">
+        <tr><td>
+            <video id="rtcvidstream" class="hide" autoplay></video>
+            <canvas id="touchcanvas" class="hide" style="border:2px solid black"></canvas>
+        </td></tr>
+        <tr><td>
+            <div class="btn-group btn-group-justified btn-group-lg" style="table-layout:auto">
+                <a href="#" id="backButton" class="btn btn-default" style="width:33.3%" title="Back">
+                    <span class="glyphicon glyphicon-chevron-left"></span>
+                </a>
+                <a href="#" id="homeButton" class="btn btn-default" style="width:33.3%" title="Home">
+                    <span class="glyphicon glyphicon-home"></span>
+                </a>
+                <a href="#" id="appSwitchButton" class="btn btn-default" style="width:33.3%" title="App Switch">
+                    <span class="glyphicon glyphicon-tasks"></span>
+                </a>
+            </div>
+        </td></tr>
+        <tr><td>
+            <br />
+            <button id="logoutButton" type="button" class="btn btn-lg btn-danger">Log Out</button>
+        </td></tr>
+    </table>
+</div>
+<script type="text/javascript" src="/lib/jquery/dist/jquery.min.js"></script>
+<script src="/js/webclient/deps/Long.min.js"></script>
+<script src="/js/webclient/deps/ByteBufferAB.min.js"></script>
+<script src="/js/webclient/deps/ProtoBuf.min.js"></script>
+<script src="/js/webclient/deps/RTCPeerConnection-v1.5.js"></script>
+<script src="/js/webclient/deps/jstz.min.js"></script>
+<script src="/js/webclient/deps/jquery.cookie.js"></script>
+<script src="/js/webclient/handlers.js"></script>
+<script src="/js/webclient/utility.js"></script>
+<script>
+    // validate browser to make sure it's supported, and set identifying variable in window
+    checkBrowser();
+
+    // check to make sure we have a session cookie
+    $.cookie.json = true;
+    window.maasData = $.cookie("maasData");
+    if (!window.maasData) {
+        alert("No session data found, please log in first.");
+        window.location.replace("/webclient-login");
+    }
+    window.maasState = "auth"; // state 1: authenticated
+    console.log('maas state: "auth"');
+
+    // logout button
+    $("#logoutButton").click(function() {
+        var result = confirm("Are you sure you want to log out and close your connection?");
+        if (result) {
+            $.removeCookie("maasData", {path: '/'});
+            window.location.replace("/webclient");
+        }
+    });
+
+    window.isMobile = ($("#touchcanvas").css("position") == "absolute");
+
+    var protocol = "ws";
+    if (window.location.protocol === "https:")
+        protocol = "wss";
+    var url = protocol + "://" + window.maasData.server.host + ":" + window.maasData.server.port;
+    var ws = new WebSocket(url, window.maasData.sessionInfo.token);
+    ws.binaryType = "arraybuffer";
+    var ProtoBuf = dcodeIO.ProtoBuf;
+    var builder = ProtoBuf.loadProtoFile("/data/maas.proto");
+    var maas = builder.build("maas");
+
+    ws.onopen = function() {
+        console.log("ws opened");
+        window.maasState = "connected"; // state 2: connected to the WebSocket
+        console.log('maas state: "auth" -> "connected"');
+    };
+
+    ws.onmessage = function(ev) {
+        var resBuilder = builder.build("maas.Response");
+        var res = resBuilder.decode(ev.data);
+        handleResponse(res, ws, maas);
+    };
+
+    ws.onclose = function(ev) {
+        var msg = "Socket has been closed, code: " + ev.code;
+
+        // no error messages are generated in "onerror", we have to guess...
+        if (ev.code === 1006 && protocol === "wss" && window.maasState === "auth") {
+            msg += "\n"
+                    + "(If you're using a self-signed certificate, navigate to '"
+                    + "https://" + window.maasData.server.host + ":" + window.maasData.server.port
+                    + "' in a new tab, accept the certificate, and try again)";
+        }
+
+        alert(msg);
+        console.log(msg);
+    };
+
+    ws.onerror = function(ev) {
+        console.log("Socket encountered an error");
+    };
+
+    window.socket = ws;
+
+    //Render WebRTC video onto canvas rather than directly in <video> element so we can get touch events
+    var canvas            = document.getElementById("touchcanvas");
+    window.canvasctx    = canvas.getContext('2d');
+    var vid                = document.getElementById("rtcvidstream");
+
+    vid.addEventListener('play', function() {
+        this_ = this;
+        setTimeout(function drawloop() {
+            try {
+                window.canvasctx.drawImage(this_, 0, 0);
+            }
+            catch(ex) {
+                if(ex.name == "NS_ERROR_NOT_AVAILABLE") {
+                    setTimeout(drawloop, 0);
+                }
+                else {
+                    throw ex;
+                }
+            }
+            setTimeout(drawloop, 1000 / 60);
+        }, 0);
+    }, 0);
+
+    //Capture touch events
+    canvas.addEventListener("touchstart", function(ev) { handleTouchStart(ev, ws, maas) }, false);
+    canvas.addEventListener("touchend", function(ev) { handleTouchEnd(ev, ws, maas) }, false);
+    canvas.addEventListener("touchmove", function(ev) { handleTouchMove(ev, ws, maas) }, false);
+    //Capture mouse events
+    canvas.addEventListener("mousedown", function(ev) { handleMouseStart(ev, ws, maas) }, false);
+    canvas.addEventListener("mouseup", function(ev) { handleMouseEnd(ev, ws, maas) }, false);
+    canvas.addEventListener("mousemove", function(ev) { handleMouseMove(ev, ws, maas) }, false);
+    canvas.addEventListener("mouseout", function(ev) { handleMouseEnd(ev, ws, maas) }, false);
+
+    // set up Android button listeners
+    $("#backButton").click(function() {
+        androidButton(4);
+    });
+    $("#homeButton").click(function() {
+        androidButton(3);
+    });
+    $("#appSwitchButton").click(function() {
+        androidButton(187);
+    });
+    function androidButton(buttonCode) {
+        if (window.maasState !== "running")
+            return;
+        var buttonRequest = new maas.Request({
+            type: maas.Request.RequestType.KEYEVENT,
+            key: {
+                eventTime: {
+                    low: 0,
+                    high: 0,
+                    unsigned: false
+                },
+                deviceId: 2,
+                flags: 72,
+                downTime: {
+                    low: 0,
+                    high: 0,
+                    unsigned: false
+                },
+                action: 0,
+                code: buttonCode,
+                repeat: 0,
+                metaState: 0,
+                scanCode: 158,
+                source: 257
+            }
+        });
+        // send button down
+        window.socket.send(buttonRequest.encodeDelimited().toArrayBuffer());
+        // send button up
+        buttonRequest.key.action = 1;
+        window.socket.send(buttonRequest.encodeDelimited().toArrayBuffer());
+    }
+</script>
+
+</body>
+</html>
